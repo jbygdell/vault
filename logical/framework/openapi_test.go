@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/hashicorp/vault/helper/jsonutil"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/version"
+	"github.com/mitchellh/mapstructure"
 )
 
 func TestOpenAPI_Regex(t *testing.T) {
@@ -258,7 +260,7 @@ func TestOpenAPI_SpecialPaths(t *testing.T) {
 	}
 }
 
-func TestOpenAPIPaths(t *testing.T) {
+func TestOpenAPI_Paths(t *testing.T) {
 	origDepth := deep.MaxDepth
 	defer func() { deep.MaxDepth = origDepth }()
 	deep.MaxDepth = 20
@@ -356,8 +358,8 @@ func TestOpenAPIPaths(t *testing.T) {
 				logical.ReadOperation: &PathOperation{
 					Summary:     "My Summary",
 					Description: "My Description",
-					Responses: map[string][]Response{
-						"202": {{
+					Responses: map[int][]Response{
+						202: {{
 							Description: "Amazing",
 							Example: &logical.Response{
 								Data: map[string]interface{}{
@@ -379,6 +381,54 @@ func TestOpenAPIPaths(t *testing.T) {
 
 		testPath(t, p, sp, expected("responses"))
 	})
+}
+
+func TestOpenAPI_CustomDecoder(t *testing.T) {
+	p := &Path{
+		Pattern:      "foo",
+		HelpSynopsis: "Synopsis",
+		Operations: map[logical.Operation]OperationHandler{
+			logical.ReadOperation: &PathOperation{
+				Summary: "My Summary",
+				Responses: map[int][]Response{
+					100: {{
+						Description: "OK",
+						Example:     &logical.Response{},
+					}},
+					200: {{
+						Description: "Good",
+						Example:     &logical.Response{},
+					}},
+					599: {{
+						Description: "Bad",
+						Example:     &logical.Response{},
+					}},
+				},
+			},
+		},
+	}
+
+	docOrig := NewOASDocument()
+	documentPath(p, nil, logical.TypeLogical, docOrig)
+
+	docJSON, err := json.Marshal(docOrig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var intermediate map[string]interface{}
+	if err := jsonutil.DecodeJSON(docJSON, &intermediate); err != nil {
+		t.Fatal(err)
+	}
+
+	docNew, err := NewOASDocumentFromMap(intermediate)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if diff := deep.Equal(docOrig, docNew); diff != nil {
+		t.Fatal(diff)
+	}
 }
 
 func testPath(t *testing.T, path *Path, sp *logical.Paths, expectedJSON string) {
@@ -405,6 +455,51 @@ func testPath(t *testing.T, path *Path, sp *logical.Paths, expectedJSON string) 
 	if diff := deep.Equal(actual, expected); diff != nil {
 		//fmt.Println(string(docJSON)) // uncomment to debug generated JSON (very helpful when fixing tests)
 		t.Fatal(diff)
+	}
+}
+
+func TestEncode(t *testing.T) {
+	type S struct {
+		Things map[int]string
+	}
+
+	s := S{
+		Things: map[int]string{
+			200: "yay",
+			400: "boo",
+		},
+	}
+	enc, _ := json.Marshal(s)
+	var dec map[string]interface{}
+	json.Unmarshal(enc, &dec)
+
+	var ns S
+	//err := mapstructure.WeakDecode(dec, &s)
+
+	f := func(src reflect.Type, tgt reflect.Type, in interface{}) (interface{}, error) {
+		if src.Kind() == reflect.String && tgt.Kind() == reflect.Int {
+			i, ok := in.(string)
+			if ok {
+				n, err := strconv.Atoi(i)
+				if err != nil {
+					return nil, err
+				}
+				if n >= 100 && n <= 999 {
+					return n, nil
+				}
+			}
+		}
+		return in, nil
+	}
+	config := &mapstructure.DecoderConfig{
+		DecodeHook: f,
+		Result:     &ns,
+	}
+
+	decoder, err := mapstructure.NewDecoder(config)
+	err = decoder.Decode(dec)
+	if err != nil {
+		panic(err)
 	}
 }
 
